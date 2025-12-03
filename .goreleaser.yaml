@@ -1,0 +1,78 @@
+version: 2
+
+project_name: gofindadomain
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: gofindadomain
+    main: ./cmd/gofindadomain
+    binary: gofindadomain
+    env:
+      - CGO_ENABLED=0
+    goos:
+      - linux
+      - darwin
+      - windows
+    goarch:
+      - amd64
+      - arm64
+    ldflags:
+      - -s -w -X main.version={{.Version}} -X main.commit={{.Commit}} -X main.date={{.Date}}
+
+archives:
+  - id: default
+    format: tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
+    format_overrides:
+      - goos: windows
+        format: zip
+    files:
+      - README.md
+      - tlds.txt
+      - top-12.txt
+
+checksum:
+  name_template: 'checksums.txt'
+
+snapshot:
+  version_template: "{{ incpatch .Version }}-next"
+
+changelog:
+  sort: asc
+  filters:
+    exclude:
+      - '^docs:'
+      - '^test:'
+      - '^chore:'
+      - Merge pull request
+      - Merge branch
+
+brews:
+  - name: gofindadomain
+    repository:
+      owner: james-see
+      name: homebrew-tap
+      token: "{{ .Env.HOMEBREW_TAP_GITHUB_TOKEN }}"
+    commit_author:
+      name: goreleaserbot
+      email: bot@goreleaser.com
+    directory: Formula
+    homepage: "https://github.com/james-see/gofindadomain"
+    description: "Domain availability checker with TUI - Go find a domain!"
+    license: "MIT"
+    test: |
+      system "#{bin}/gofindadomain", "--help"
+    install: |
+      bin.install "gofindadomain"
+
+release:
+  github:
+    owner: james-see
+    name: gofindadomain
+  draft: false
+  prerelease: auto
+  name_template: "v{{ .Version }}"
+

@@ -1,0 +1,12 @@
+.com
+.org
+.de
+.cn
+.uk
+.net
+.ru
+.br
+.au
+.fr
+.it
+.jp
