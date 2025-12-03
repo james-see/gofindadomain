@@ -8,7 +8,8 @@ before:
 
 builds:
   - id: gofindadomain
-    main: ./cmd/gofindadomain
+    dir: .
+    main: ./cmd/gofindadomain/main.go
     binary: gofindadomain
     env:
       - CGO_ENABLED=0
@@ -24,15 +25,15 @@ builds:
 
 archives:
   - id: default
-    format: tar.gz
+    formats:
+      - tar.gz
     name_template: "{{ .ProjectName }}_{{ .Version }}_{{ .Os }}_{{ .Arch }}"
     format_overrides:
       - goos: windows
-        format: zip
+        formats:
+          - zip
     files:
       - README.md
-      - tlds.txt
-      - top-12.txt
 
 checksum:
   name_template: 'checksums.txt'
@@ -75,4 +76,3 @@ release:
   draft: false
   prerelease: auto
   name_template: "v{{ .Version }}"
-
