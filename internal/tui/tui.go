@@ -89,7 +89,9 @@ type Model struct {
 }
 
 type resultMsg checker.Result
-type checkDoneMsg struct{}
+type checkDoneMsg struct {
+	results []checker.Result
+}
 
 func NewModel(tlds []string) Model {
 	ti := textinput.New()
@@ -157,12 +159,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.keyword = m.keywordInput.Value()
 				if m.keyword != "" {
 					m.state = stateSelectTLDs
-					// Pre-select popular TLDs
-					for i, tld := range m.tlds {
-						if tld == ".com" || tld == ".net" || tld == ".org" || tld == ".io" || tld == ".dev" {
-							m.selectedTLDs[i] = true
-						}
-					}
+					// Don't pre-select any TLDs - let user choose
 				}
 				return m, nil
 			}
@@ -188,6 +185,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if !allSelected {
 					for i := range m.tlds {
 						m.selectedTLDs[i] = true
+					}
+				}
+			case "p":
+				// Select popular TLDs
+				popular := []string{".com", ".net", ".org", ".io", ".dev", ".co", ".app", ".ai"}
+				for i, tld := range m.tlds {
+					for _, p := range popular {
+						if tld == p {
+							m.selectedTLDs[i] = true
+						}
 					}
 				}
 			case "enter":
@@ -226,6 +233,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case checkDoneMsg:
 		m.checking = false
 		m.state = stateResults
+		m.results = msg.results
+		m.checkedCount = len(msg.results)
 		return m, nil
 	}
 
@@ -233,30 +242,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 }
 
 func (m Model) startChecking() tea.Cmd {
-	return func() tea.Msg {
-		var domains []string
-		for i, selected := range m.selectedTLDs {
-			if selected {
-				domains = append(domains, m.keyword+m.tlds[i])
-			}
+	var domains []string
+	for i, selected := range m.selectedTLDs {
+		if selected {
+			domains = append(domains, m.keyword+m.tlds[i])
 		}
+	}
 
+	ctx := m.ctx
+
+	return func() tea.Msg {
 		resultChan := make(chan checker.Result, len(domains))
+
 		go func() {
-			checker.CheckDomains(m.ctx, domains, 30, resultChan)
+			checker.CheckDomains(ctx, domains, 30, resultChan)
 			close(resultChan)
 		}()
 
-		// This is a simplified approach - in production you'd want a proper
-		// subscription pattern
+		var results []checker.Result
 		for result := range resultChan {
-			// Send each result as a message
-			// Note: This blocks, which is not ideal for real-time updates
-			// A better approach would use tea.Program.Send()
-			_ = result
+			results = append(results, result)
 		}
 
-		return checkDoneMsg{}
+		return checkDoneMsg{results: results}
 	}
 }
 
@@ -305,7 +313,7 @@ func (m Model) View() string {
 		}
 
 		s.WriteString("\n")
-		s.WriteString(helpStyle.Render(fmt.Sprintf("Selected: %d • Space to toggle • 'a' to toggle all • Enter to check • Esc to go back", len(m.selectedTLDs))))
+		s.WriteString(helpStyle.Render(fmt.Sprintf("Selected: %d • Space: toggle • 'a': all • 'p': popular (.com,.net,.org,.io,.dev,.co,.app,.ai) • Enter: check", len(m.selectedTLDs))))
 
 	case stateChecking:
 		s.WriteString(titleStyle.Render("Checking domains..."))
@@ -352,7 +360,7 @@ func formatResult(r checker.Result, showOnlyAvail bool) string {
 	}
 
 	if r.Available {
-		return availableStyle.Render(fmt.Sprintf("[avail] %s\n", r.Domain))
+		return availableStyle.Render("[avail]") + " " + r.Domain + "\n"
 	}
 
 	if showOnlyAvail {
@@ -360,9 +368,9 @@ func formatResult(r checker.Result, showOnlyAvail bool) string {
 	}
 
 	if r.ExpiryDate != "" {
-		return takenStyle.Render("[taken]") + fmt.Sprintf(" %s - Exp: %s\n", r.Domain, expiryStyle.Render(r.ExpiryDate))
+		return takenStyle.Render("[taken]") + " " + r.Domain + " - Exp: " + expiryStyle.Render(r.ExpiryDate) + "\n"
 	}
-	return takenStyle.Render("[taken]") + fmt.Sprintf(" %s\n", r.Domain)
+	return takenStyle.Render("[taken]") + " " + r.Domain + "\n"
 }
 
 func min(a, b int) int {
