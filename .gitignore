@@ -1,5 +1,5 @@
 # Binaries
-gofindadomain
+/gofindadomain
 *.exe
 *.exe~
 *.dll
