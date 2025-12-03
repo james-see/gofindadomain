@@ -1,6 +1,6 @@
 module github.com/james-see/gofindadomain
 
-go 1.22
+go 1.23
 
 require (
 	github.com/charmbracelet/bubbles v0.21.0
