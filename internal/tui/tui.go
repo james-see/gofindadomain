@@ -4,7 +4,10 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
 	"github.com/charmbracelet/bubbles/textinput"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
@@ -17,7 +20,6 @@ var (
 	secondaryColor = lipgloss.Color("#FF6B6B")
 	accentColor    = lipgloss.Color("#FFE66D")
 	dimColor       = lipgloss.Color("#666666")
-	bgColor        = lipgloss.Color("#1a1a2e")
 
 	// Styles
 	titleStyle = lipgloss.NewStyle().
@@ -44,12 +46,11 @@ var (
 	helpStyle = lipgloss.NewStyle().
 			Foreground(dimColor)
 
-	resultStyle = lipgloss.NewStyle().
-			Padding(0, 2)
-
 	bannerStyle = lipgloss.NewStyle().
 			Foreground(primaryColor).
 			Bold(true)
+
+	spinnerStyle = lipgloss.NewStyle().Foreground(primaryColor)
 )
 
 const banner = `
@@ -69,9 +70,19 @@ const (
 	stateResults
 )
 
+// Shared state for async results
+type asyncResults struct {
+	mu       sync.Mutex
+	results  []checker.Result
+	done     bool
+}
+
+var sharedResults *asyncResults
+
 type Model struct {
 	state         state
 	keywordInput  textinput.Model
+	spinner       spinner.Model
 	keyword       string
 	tlds          []string
 	selectedTLDs  map[int]bool
@@ -83,15 +94,14 @@ type Model struct {
 	checking      bool
 	checkedCount  int
 	totalCount    int
+	startTime     time.Time
 	err           error
 	width         int
 	height        int
 }
 
-type resultMsg checker.Result
-type checkDoneMsg struct {
-	results []checker.Result
-}
+type tickMsg time.Time
+type checkDoneMsg struct{}
 
 func NewModel(tlds []string) Model {
 	ti := textinput.New()
@@ -100,11 +110,16 @@ func NewModel(tlds []string) Model {
 	ti.CharLimit = 63
 	ti.Width = 40
 
+	s := spinner.New()
+	s.Spinner = spinner.Dot
+	s.Style = spinnerStyle
+
 	ctx, cancel := context.WithCancel(context.Background())
 
 	return Model{
 		state:        stateInput,
 		keywordInput: ti,
+		spinner:      s,
 		tlds:         tlds,
 		selectedTLDs: make(map[int]bool),
 		ctx:          ctx,
@@ -116,6 +131,12 @@ func NewModel(tlds []string) Model {
 
 func (m Model) Init() tea.Cmd {
 	return textinput.Blink
+}
+
+func tickEvery() tea.Cmd {
+	return tea.Tick(100*time.Millisecond, func(t time.Time) tea.Msg {
+		return tickMsg(t)
+	})
 }
 
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
@@ -159,7 +180,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.keyword = m.keywordInput.Value()
 				if m.keyword != "" {
 					m.state = stateSelectTLDs
-					// Don't pre-select any TLDs - let user choose
 				}
 				return m, nil
 			}
@@ -179,7 +199,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case " ":
 				m.selectedTLDs[m.tldCursor] = !m.selectedTLDs[m.tldCursor]
 			case "a":
-				// Toggle all
 				allSelected := len(m.selectedTLDs) == len(m.tlds)
 				m.selectedTLDs = make(map[int]bool)
 				if !allSelected {
@@ -188,7 +207,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 				}
 			case "p":
-				// Select popular TLDs
 				popular := []string{".com", ".net", ".org", ".io", ".dev", ".co", ".app", ".ai"}
 				for i, tld := range m.tlds {
 					for _, p := range popular {
@@ -202,7 +220,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.state = stateChecking
 					m.checking = true
 					m.totalCount = len(m.selectedTLDs)
-					return m, m.startChecking()
+					m.startTime = time.Now()
+					return m, tea.Batch(m.startChecking(), m.spinner.Tick, tickEvery())
 				}
 			case "backspace", "esc":
 				m.state = stateInput
@@ -212,29 +231,48 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 
 		case stateChecking:
-			// Allow cancel during checking
 			return m, nil
 
 		case stateResults:
-			switch msg.String() {
-			case "up", "k":
-				// Could add scrolling here
-			case "down", "j":
-				// Could add scrolling here
-			}
 			return m, nil
 		}
 
-	case resultMsg:
-		m.results = append(m.results, checker.Result(msg))
-		m.checkedCount++
+	case spinner.TickMsg:
+		if m.state == stateChecking {
+			m.spinner, cmd = m.spinner.Update(msg)
+			return m, cmd
+		}
 		return m, nil
+
+	case tickMsg:
+		if m.state != stateChecking || sharedResults == nil {
+			return m, nil
+		}
+
+		sharedResults.mu.Lock()
+		m.results = make([]checker.Result, len(sharedResults.results))
+		copy(m.results, sharedResults.results)
+		m.checkedCount = len(m.results)
+		done := sharedResults.done
+		sharedResults.mu.Unlock()
+
+		if done {
+			m.checking = false
+			m.state = stateResults
+			return m, nil
+		}
+
+		return m, tea.Batch(tickEvery(), m.spinner.Tick)
 
 	case checkDoneMsg:
 		m.checking = false
 		m.state = stateResults
-		m.results = msg.results
-		m.checkedCount = len(msg.results)
+		if sharedResults != nil {
+			sharedResults.mu.Lock()
+			m.results = sharedResults.results
+			m.checkedCount = len(m.results)
+			sharedResults.mu.Unlock()
+		}
 		return m, nil
 	}
 
@@ -251,6 +289,11 @@ func (m Model) startChecking() tea.Cmd {
 
 	ctx := m.ctx
 
+	// Initialize shared results
+	sharedResults = &asyncResults{
+		results: make([]checker.Result, 0, len(domains)),
+	}
+
 	return func() tea.Msg {
 		resultChan := make(chan checker.Result, len(domains))
 
@@ -259,12 +302,17 @@ func (m Model) startChecking() tea.Cmd {
 			close(resultChan)
 		}()
 
-		var results []checker.Result
 		for result := range resultChan {
-			results = append(results, result)
+			sharedResults.mu.Lock()
+			sharedResults.results = append(sharedResults.results, result)
+			sharedResults.mu.Unlock()
 		}
 
-		return checkDoneMsg{results: results}
+		sharedResults.mu.Lock()
+		sharedResults.done = true
+		sharedResults.mu.Unlock()
+
+		return checkDoneMsg{}
 	}
 }
 
@@ -286,7 +334,6 @@ func (m Model) View() string {
 		s.WriteString(titleStyle.Render(fmt.Sprintf("Select TLDs for '%s':", m.keyword)))
 		s.WriteString("\n\n")
 
-		// Show a scrollable list of TLDs
 		visibleCount := min(m.height-12, len(m.tlds))
 		start := max(0, m.tldCursor-visibleCount/2)
 		end := min(len(m.tlds), start+visibleCount)
@@ -313,24 +360,40 @@ func (m Model) View() string {
 		}
 
 		s.WriteString("\n")
-		s.WriteString(helpStyle.Render(fmt.Sprintf("Selected: %d • Space: toggle • 'a': all • 'p': popular (.com,.net,.org,.io,.dev,.co,.app,.ai) • Enter: check", len(m.selectedTLDs))))
+		s.WriteString(helpStyle.Render(fmt.Sprintf("Selected: %d • Space: toggle • 'a': all • 'p': popular • Enter: check", len(m.selectedTLDs))))
 
 	case stateChecking:
-		s.WriteString(titleStyle.Render("Checking domains..."))
+		s.WriteString(m.spinner.View())
+		s.WriteString(titleStyle.Render(" Checking domains..."))
 		s.WriteString("\n\n")
-		s.WriteString(fmt.Sprintf("Progress: %d/%d\n", m.checkedCount, m.totalCount))
-		s.WriteString("\n")
 
-		// Show results as they come in
-		for _, r := range m.results {
-			s.WriteString(formatResult(r, m.showOnlyAvail))
+		// Progress bar
+		pct := 0
+		if m.totalCount > 0 {
+			pct = (m.checkedCount * 100) / m.totalCount
+		}
+		barWidth := 40
+		filled := (pct * barWidth) / 100
+		bar := strings.Repeat("█", filled) + strings.Repeat("░", barWidth-filled)
+		elapsed := time.Since(m.startTime).Round(time.Second)
+
+		s.WriteString(fmt.Sprintf("Progress: [%s] %d/%d (%d%%) - %s\n\n", bar, m.checkedCount, m.totalCount, pct, elapsed))
+
+		// Show last few results
+		if len(m.results) > 0 {
+			s.WriteString(helpStyle.Render("Recent results:\n"))
+			start := max(0, len(m.results)-5)
+			for _, r := range m.results[start:] {
+				s.WriteString(formatResult(r, false))
+			}
 		}
 
 		s.WriteString("\n")
 		s.WriteString(helpStyle.Render("Press Ctrl+C to cancel"))
 
 	case stateResults:
-		s.WriteString(titleStyle.Render("Results:"))
+		elapsed := time.Since(m.startTime).Round(time.Second)
+		s.WriteString(titleStyle.Render(fmt.Sprintf("Results (completed in %s):", elapsed)))
 		if m.showOnlyAvail {
 			s.WriteString(helpStyle.Render(" (showing available only)"))
 		}
@@ -390,15 +453,6 @@ func max(a, b int) int {
 // Run starts the TUI
 func Run(tlds []string) error {
 	p := tea.NewProgram(NewModel(tlds), tea.WithAltScreen())
-	_, err := p.Run()
-	return err
-}
-
-// RunWithUpdates runs the TUI with a channel for live updates
-func RunWithUpdates(tlds []string) error {
-	model := NewModel(tlds)
-	p := tea.NewProgram(model, tea.WithAltScreen())
-
 	_, err := p.Run()
 	return err
 }
